@@ -1,0 +1,53 @@
+# NOX backend image.
+# Build context must be the nox/ repo root, e.g. from nox/:
+#   docker build -f infrastructure/docker/Dockerfile.backend -t nox-backend .
+#
+# The directory layout (backend/ next to database/) is mirrored inside the
+# image on purpose: package.json references ../database/prisma/schema.prisma
+# and the Prisma generator output is ../../backend/node_modules/.prisma/client
+# relative to the schema. Flattening the layout breaks client generation.
+#
+# No .env file is baked into the image. Configuration is supplied at runtime
+# through environment variables (see infrastructure/docker/docker-compose.yml).
+
+# ---------- Stage 1: install all deps, generate Prisma client, compile ----------
+FROM node:20-alpine AS builder
+# Prisma's query engine needs OpenSSL on Alpine.
+RUN apk add --no-cache openssl
+WORKDIR /app/backend
+
+COPY backend/package.json backend/package-lock.json ./
+RUN npm ci
+
+COPY database/prisma /app/database/prisma
+COPY backend/ ./
+
+RUN npx prisma generate --schema=../database/prisma/schema.prisma
+RUN npm run build
+
+# Drop devDependencies, then regenerate so the client is guaranteed present
+# in the pruned node_modules (prisma CLI is a production dependency).
+RUN npm prune --omit=dev \
+ && npx prisma generate --schema=../database/prisma/schema.prisma
+
+# ---------- Stage 2: minimal runtime ----------
+FROM node:20-alpine AS runner
+RUN apk add --no-cache openssl
+ENV NODE_ENV=production
+WORKDIR /app/backend
+
+COPY --from=builder --chown=node:node /app/backend/package.json ./package.json
+COPY --from=builder --chown=node:node /app/backend/node_modules ./node_modules
+COPY --from=builder --chown=node:node /app/backend/dist ./dist
+COPY --from=builder --chown=node:node /app/database/prisma /app/database/prisma
+
+USER node
+
+# 3000 = HTTP API (PORT), 3001 = WebSocket (WS_PORT)
+EXPOSE 3000 3001
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
+  CMD wget -qO- "http://localhost:${PORT:-3000}/api/health" >/dev/null || exit 1
+
+# tsconfig.build.json sets rootDir=./src, so output is dist/main.js
+CMD ["node", "dist/main.js"]

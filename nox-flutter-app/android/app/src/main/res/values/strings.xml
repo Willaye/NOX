@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="accessibility_service_description">NOX monitors chat and browser activity on this device. Required for the admin to see what\'s happening in real time.</string>
+</resources>

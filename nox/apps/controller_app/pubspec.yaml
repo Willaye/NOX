@@ -1,0 +1,70 @@
+name: nox_controller
+description: NOX — Remote Device Management (single app, role-based)
+version: 1.0.0+1
+publish_to: none
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  nox_design_system:
+    path: ../../packages/design_system
+
+  # State / routing / HTTP (existing)
+  flutter_riverpod: ^2.5.1
+  riverpod_annotation: ^2.3.5
+  go_router: ^14.2.0
+  dio: ^5.4.0
+  flutter_secure_storage: ^9.0.0
+
+  # UI helpers (existing)
+  cached_network_image: ^3.3.1
+  shimmer: ^3.0.0
+  flutter_svg: ^2.0.10+1
+  intl: ^0.19.0
+
+  # Phase 3 additions ─────────────────────────────────────────
+  # Real-time WebSocket channel to listen for admin:unlock-alert etc.
+  # web_socket_channel is removed in favor of socket_io_client (the backend
+  # gateway speaks socket.io, not raw WS).
+  socket_io_client: ^2.0.3+1
+
+  # Firebase push notifications (optional; app degrades if not initialized).
+  firebase_core: ^3.6.0
+  firebase_messaging: ^15.1.3
+
+  # Deep links for the enrollment flow (nox://enroll?token=...).
+  app_links: ^6.3.2
+
+  # Runtime permission requests for the employee one-shot flow. Covers the
+  # Android permissions we can request from inside the app; Accessibility,
+  # Usage Access, and Device Admin are opened as settings intents by the
+  # native agent in Phase 4.
+  permission_handler: ^11.3.1
+
+  # Buzzer sound played when admin:unlock-alert fires.
+  audioplayers: ^6.1.0
+
+  # Gallery download destination + video playback
+  path_provider: ^2.1.4
+  video_player: ^2.9.2
+
+  # Launch real apps (WhatsApp, Instagram, Snapchat, Browser)
+  url_launcher: ^6.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  build_runner: ^2.4.8
+  riverpod_generator: ^2.4.0
+
+flutter:
+  uses-material-design: true
+  # Buzzer asset (binary added later; empty file is fine for the audio
+  # package — it will fail gracefully on play if invalid).
+  assets:
+    - assets/sounds/
+    - assets/images/

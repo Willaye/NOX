@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+.env.*.local
+*.tsbuildinfo
+postgres-data/
+coverage/
+.DS_Store
+.idea/
+.vscode/
+*.log
+.claude/
+.agents/
+.cursor/
+.devin/

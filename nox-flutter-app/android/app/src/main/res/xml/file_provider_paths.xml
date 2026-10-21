@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Paths exposed via FileProvider so NoxUpdater can hand the system package
+    installer a content:// URI pointing at the downloaded update APK. We
+    deliberately expose only the "updates/" subdirectory inside app cache so
+    nothing else leaks.
+-->
+<paths>
+    <!-- Context.getCacheDir() → /data/data/<pkg>/cache/ -->
+    <cache-path name="nox_updates" path="updates/" />
+
+    <!-- Context.getExternalCacheDir() → /storage/emulated/0/Android/data/<pkg>/cache/.
+         Some OEMs (older MIUI) reject content:// install from internal cache,
+         so the updater will fall back to external cache if present. -->
+    <external-cache-path name="nox_updates_ext" path="updates/" />
+</paths>

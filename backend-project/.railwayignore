@@ -1,0 +1,20 @@
+node_modules
+dist
+.git
+postgres-data
+uploads
+*.log
+*.tsbuildinfo
+
+# ──────────────────────────────────────────────────────────────────────
+# Force-include the signed APKs + manifest even though `.gitignore` lists
+# `/apk/*`. Railway merges `.gitignore` with this file; a negation here
+# re-adds specific files that would otherwise be excluded.
+# These files are intentionally NOT tracked by Git (too large), but MUST
+# ship to Railway so the backend can serve `/api/enroll/download/:kind`
+# and `/api/enroll/version/:kind`.
+# ──────────────────────────────────────────────────────────────────────
+!apk/
+!apk/manifest.json
+!apk/nox-agent.apk
+!apk/nox-admin.apk

@@ -1,0 +1,60 @@
+# ══════════════════════════════════════════════════════════════════
+# NOX — Root .gitignore
+# ══════════════════════════════════════════════════════════════════
+
+# ─── Environment & Secrets ───────────────────────────────────────
+.env
+.env.local
+.env.production
+!.env.example
+!.env.railway
+
+# ─── Node / Backend ─────────────────────────────────────────────
+node_modules/
+dist/
+tsconfig.build.tsbuildinfo
+*.tsbuildinfo
+.npm/
+npm-debug.log*
+
+# ─── Flutter / Dart ──────────────────────────────────────────────
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+*.iml
+.metadata
+
+# ─── Android ─────────────────────────────────────────────────────
+.gradle/
+.kotlin/
+local.properties
+*.apk
+*.aab
+*.jks
+*.keystore
+app/build/
+android/app/build/
+
+# ─── IDE ─────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Database & Binaries ────────────────────────────────────────
+postgres-data/
+uploads/
+*.sqlite
+*.sqlite3
+
+# ─── Temp & Generated ───────────────────────────────────────────
+/tmp/
+*.log
+*.pid
+coverage/
+.cache/

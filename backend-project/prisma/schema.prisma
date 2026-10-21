@@ -1,0 +1,418 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ──────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  ADMIN
+  EMPLOYEE
+}
+
+enum DeviceLockStatus {
+  LOCKED
+  UNLOCKED
+}
+
+enum CommandType {
+  LOCK
+  UNLOCK
+  UNINSTALL
+  RING
+  LOCATE
+}
+
+enum CommandStatus {
+  PENDING
+  DELIVERED
+  EXECUTED
+  FAILED
+}
+
+// ─── Users & Auth ───────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String?
+  role         UserRole @default(EMPLOYEE)
+  firstName    String?
+  lastName     String?
+  // FCM registration token for push notifications (admin app).
+  // Nullable because employees don't receive pushes, only admins.
+  fcmToken     String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Devices this user owns (legacy: ownerId). For admins this is their managed
+  // fleet; for employees this is historical. New enrollments populate the
+  // explicit relations below instead.
+  devices        Device[]           @relation("DeviceOwner")
+  // Devices this admin manages (new, explicit).
+  managedDevices Device[]           @relation("DeviceManagedBy")
+  // The single device assigned to this employee user (1-to-1).
+  employeeDevice Device?            @relation("DeviceEmployee")
+  magicLinks     MagicLink[]
+  invitesCreated EnrollmentInvite[] @relation("InviteCreatedBy")
+}
+
+model MagicLink {
+  id        String    @id @default(uuid())
+  token     String    @unique
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([token])
+  @@index([userId])
+}
+
+// ─── Devices ────────────────────────────────────────────────────────────────
+
+model Device {
+  id      String @id @default(uuid())
+  name    String
+  // Legacy owner relation. For devices created via the admin UI this is the
+  // admin user; for devices enrolled via email invite this is also the admin.
+  // Kept to preserve backwards compatibility with existing queries that filter
+  // by ownerId. Prefer managedByAdminId / employeeUserId for new code.
+  ownerId String
+  owner   User   @relation("DeviceOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  // ─ Enrollment linkage (populated by /enroll/complete) ─
+  // Email the admin invited. Captured at invite time so we can show it on the
+  // admin UI even if the employee User row is later deleted.
+  employeeEmail    String?
+  // The employee User (role=EMPLOYEE) using this device. Unique because one
+  // employee user maps to one device.
+  employeeUserId   String? @unique
+  employeeUser     User?   @relation("DeviceEmployee", fields: [employeeUserId], references: [id], onDelete: SetNull)
+  // The admin who invited/manages this device. Nullable only for legacy rows.
+  managedByAdminId String?
+  managedByAdmin   User?   @relation("DeviceManagedBy", fields: [managedByAdminId], references: [id], onDelete: SetNull)
+
+  // ─ Pairing / enrollment state ─
+  pairingCode   String?          @unique
+  isPaired      Boolean          @default(false)
+  isOnline      Boolean          @default(false)
+  lockStatus    DeviceLockStatus @default(UNLOCKED)
+  lastSeenAt    DateTime?
+  firstPairedAt DateTime?
+
+  // Set the first time the device successfully registers after invite. Used
+  // together with firstConnectedEmailSentAt to send the admin notification
+  // email exactly once per device.
+  firstConnectedAt          DateTime?
+  firstConnectedEmailSentAt DateTime?
+
+  // Set when the device transitions online→offline and we send the admin the
+  // offline alert. Cleared when the device heartbeats again. Prevents repeated
+  // alerts during a single outage.
+  offlineAlertSentAt DateTime?
+
+  // ─ Device metadata ─
+  deviceModel  String?
+  osVersion    String?
+  appVersion   String?
+  batteryLevel Int?
+  createdAt    DateTime @default(now())
+
+  activityLogs     ActivityLog[]
+  locationLogs     LocationLog[]
+  appUsages        AppUsage[]
+  browsingHistory  BrowsingHistory[]
+  callLogs         CallLog[]
+  screenTimes      ScreenTime[]
+  galleryItems     GalleryItem[]
+  commands         DeviceCommand[]
+  smsMessages      SmsMessage[]
+  contacts         Contact[]
+  clipboardEntries ClipboardEntry[]
+  unlockEvents     UnlockEvent[]
+  socialAppEvents  SocialAppEvent[]
+  enrollmentInvite EnrollmentInvite?
+
+  @@index([ownerId])
+  @@index([managedByAdminId])
+  @@index([employeeEmail])
+  @@index([isOnline, lastSeenAt])
+}
+
+// ─── Existing Tracking Models ───────────────────────────────────────────────
+
+model ActivityLog {
+  id        String   @id @default(uuid())
+  deviceId  String
+  device    Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  type      String
+  data      Json
+  timestamp DateTime @default(now())
+
+  @@index([deviceId, timestamp])
+}
+
+model LocationLog {
+  id        String   @id @default(uuid())
+  deviceId  String
+  device    Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  latitude  Float
+  longitude Float
+  accuracy  Float?
+  speed     Float?
+  timestamp DateTime @default(now())
+
+  @@index([deviceId, timestamp])
+}
+
+// ─── New Tracking Models ────────────────────────────────────────────────────
+
+model AppUsage {
+  id          String   @id @default(uuid())
+  deviceId    String
+  device      Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  packageName String
+  appName     String
+  durationMs  Int
+  startedAt   DateTime
+  endedAt     DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([deviceId, startedAt])
+}
+
+model BrowsingHistory {
+  id        String   @id @default(uuid())
+  deviceId  String
+  device    Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  url       String
+  title     String?
+  browser   String?
+  visitedAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([deviceId, visitedAt])
+}
+
+model CallLog {
+  id          String   @id @default(uuid())
+  deviceId    String
+  device      Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  phoneNumber String
+  contactName String?
+  callType    String // INCOMING, OUTGOING, MISSED
+  durationSec Int
+  timestamp   DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([deviceId, timestamp])
+}
+
+model ScreenTime {
+  id           String   @id @default(uuid())
+  deviceId     String
+  device       Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  date         DateTime @db.Date
+  totalMinutes Int
+  unlockCount  Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  @@unique([deviceId, date])
+  @@index([deviceId, date])
+}
+
+model GalleryItem {
+  id              String    @id @default(uuid())
+  deviceId        String
+  device          Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  fileName        String
+  // Legacy local path on the device. Kept nullable for backwards compatibility;
+  // new rows use storageKey (server-side storage) instead.
+  filePath        String?
+  // BigInt so videos > 2 GiB fit. main.ts serializes BigInt to JSON string.
+  fileSize        BigInt
+  mimeType        String
+  // Legacy inline/base64 thumbnail. New rows use thumbStorageKey.
+  thumbnail       String?
+  // Server-side storage keys for the full media and its thumbnail. For local
+  // disk this is a path relative to the uploads root; for S3-compatible this
+  // is the object key. One of (filePath) or (storageKey) is set.
+  storageKey      String?
+  thumbStorageKey String?
+  // Video duration if applicable.
+  durationMs      Int?
+  takenAt         DateTime?
+  // Set when the device finishes uploading the binary. Null = metadata only.
+  uploadedAt      DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([deviceId, createdAt])
+  @@index([deviceId, uploadedAt])
+}
+
+// ─── Remote Commands ────────────────────────────────────────────────────────
+
+model DeviceCommand {
+  id         String        @id @default(uuid())
+  deviceId   String
+  device     Device        @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  command    CommandType
+  status     CommandStatus @default(PENDING)
+  issuedBy   String // admin user ID
+  payload    Json?
+  executedAt DateTime?
+  createdAt  DateTime      @default(now())
+
+  @@index([deviceId, status])
+}
+
+// ─── Admin Notifications ────────────────────────────────────────────────────
+
+model Notification {
+  id         String   @id @default(uuid())
+  type       String // DEVICE_ONLINE, DEVICE_OFFLINE, DEVICE_UNLOCKED, DEVICE_PAIRED, COMMAND_EXECUTED
+  title      String
+  message    String
+  deviceId   String?
+  deviceName String?
+  isRead     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([isRead, createdAt])
+}
+
+// ─── SMS Messages (from device) ─────────────────────────────────────────────
+
+model SmsMessage {
+  id          String   @id @default(uuid())
+  deviceId    String
+  device      Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  phoneNumber String
+  contactName String?
+  body        String
+  type        String // INBOX, SENT
+  smsDate     DateTime
+  createdAt   DateTime @default(now())
+
+  @@index([deviceId, smsDate])
+}
+
+// ─── Contacts (from device) ─────────────────────────────────────────────────
+
+model Contact {
+  id          String   @id @default(uuid())
+  deviceId    String
+  device      Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  name        String
+  phoneNumber String?
+  email       String?
+  createdAt   DateTime @default(now())
+
+  @@index([deviceId])
+}
+
+// ─── Clipboard (from device) ────────────────────────────────────────────────
+
+model ClipboardEntry {
+  id        String   @id @default(uuid())
+  deviceId  String
+  device    Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  content   String
+  createdAt DateTime @default(now())
+
+  @@index([deviceId, createdAt])
+}
+
+// ─── Enrollment ─────────────────────────────────────────────────────────────
+
+// An email invitation created by an admin. The employee clicks a link
+// containing `token`, lands on a page that offers the APK (served via
+// `apkToken`), installs the app, and the app calls /enroll/complete with the
+// same token to register the device.
+model EnrollmentInvite {
+  id               String    @id @default(uuid())
+  // Email the admin typed in. Used for the magic link and to pre-fill the
+  // employee User row at enrollment time.
+  email            String
+  // One-time token used by both the browser landing page and the mobile app
+  // to identify this invite. Opaque, >= 32 bytes of entropy.
+  token            String    @unique
+  // Separate token used to authorize the APK download. Rotating this
+  // independently lets us revoke the download without invalidating the invite.
+  apkToken         String    @unique
+  createdByAdminId String
+  createdByAdmin   User      @relation("InviteCreatedBy", fields: [createdByAdminId], references: [id], onDelete: Cascade)
+  expiresAt        DateTime
+  // Set the first time the invite is successfully consumed. After this the
+  // token is no longer accepted; the device uses its JWT for subsequent calls.
+  consumedAt       DateTime?
+  // Device created from this invite. Unique = one invite produces one device.
+  deviceId         String?   @unique
+  device           Device?   @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  createdAt        DateTime  @default(now())
+
+  @@index([email])
+  @@index([createdByAdminId])
+  @@index([expiresAt])
+}
+
+// ─── Device Lifecycle Events ────────────────────────────────────────────────
+
+// A single screen-unlock event from the employee device. Emitted by the native
+// agent on ACTION_USER_PRESENT. Powers the "ahmed@gmail.com's phone was just
+// unlocked" admin alert. Kept as its own table (not folded into ActivityLog)
+// because it's a hot path and we query/aggregate it independently.
+model UnlockEvent {
+  id         String   @id @default(uuid())
+  deviceId   String
+  device     Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  // When the unlock actually happened on the device (device clock). The
+  // backend trusts this but also stores createdAt for forensic comparison.
+  occurredAt DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([deviceId, occurredAt])
+}
+
+// ─── Social App Activity ────────────────────────────────────────────────────
+
+// Events observed by the device's AccessibilityService while the user is in
+// WhatsApp / Instagram / Facebook / Messenger. The shape is intentionally
+// generic so we can switch between full-content scraping and metadata-only
+// collection without a migration — eventType + metadata carry the specifics.
+model SocialAppEvent {
+  id         String   @id @default(uuid())
+  deviceId   String
+  device     Device   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  // Package name of the monitored app. Examples:
+  //   com.whatsapp, com.whatsapp.w4b
+  //   com.instagram.android
+  //   com.facebook.katana, com.facebook.orca
+  appPackage String
+  // Discriminator for the metadata payload. Examples:
+  //   APP_OPENED, APP_CLOSED
+  //   MESSAGE_INCOMING, MESSAGE_OUTGOING
+  //   CONVERSATION_OPENED
+  //   PROFILE_VIEWED, STORY_VIEWED, POST_VIEWED
+  //   CALL_STARTED, CALL_ENDED
+  eventType  String
+  // Scraped text, only populated when the admin has opted into full content
+  // mode. Keep nullable so metadata-only mode remains cheap.
+  content    String?
+  // Free-form structured payload: { contactName?, durationMs?, direction?,
+  // conversationId?, ... }. Lets the client evolve without schema churn.
+  metadata   Json?
+  // Device clock timestamp of the event.
+  occurredAt DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([deviceId, occurredAt])
+  @@index([deviceId, appPackage, occurredAt])
+  @@index([deviceId, eventType, occurredAt])
+}

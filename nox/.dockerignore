@@ -1,0 +1,19 @@
+# Keep the build context small and free of secrets / host artifacts.
+**/node_modules
+**/dist
+**/coverage
+**/*.tsbuildinfo
+**/*.log
+.env
+.env.*
+!.env.example
+.git
+apps/
+packages/
+postgres-data/
+.idea/
+.vscode/
+.claude/
+.agents/
+.cursor/
+.devin/

@@ -1,0 +1,637 @@
+generator client {
+  provider = "prisma-client-js"
+  // This schema lives outside the backend package, so without an explicit
+  // output Prisma resolves @prisma/client upward from nox/database/ and may
+  // generate into an unrelated node_modules (e.g. ~/node_modules). Pin it to
+  // the backend's install so `import { PrismaClient } from '@prisma/client'`
+  // in nox/backend picks up this schema. (Path is relative to this file.)
+  output   = "../../backend/node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── REFERENTIAL ACTION CONVENTIONS ──────────────────────
+// - Rows owned by a parent (devices of a user, sessions/tokens of a user,
+//   sessions/files/transfers of a device) use onDelete: Cascade.
+// - Optional "context" references (e.g. the device a notification/alert/
+//   message is about, the org a user belongs to) use onDelete: SetNull so
+//   the parent record survives.
+// - AuditLog references always use SetNull: the audit trail must outlive
+//   the users/devices it describes.
+// Note: most models also use soft-delete (deletedAt); these actions only
+// apply to hard deletes.
+//
+// ─── BIGINT NOTE ─────────────────────────────────────────
+// Byte counts (Device.storageUsed/storageTotal, File.size,
+// FileTransfer.bytesTransferred/totalBytes) are BigInt because Postgres
+// INTEGER is 32-bit (max ~2 GiB) and device storage / large files exceed
+// that. Prisma returns these as JS `bigint`, which JSON.stringify cannot
+// serialize. The API layer MUST convert them (e.g. Number(x) or x.toString())
+// or register a global serializer such as:
+//   (BigInt.prototype as any).toJSON = function () { return this.toString(); };
+//
+// ─── UNUSED MODELS (TODO: future cleanup) ────────────────
+// The following models are not referenced by the backend (nox/backend/src)
+// as of this revision: Organization, Workspace, Portal, RemoteSession,
+// SupportSession, FileTransfer, DevicePermission.
+// (Portal is only written by prisma/seed.ts.) Either implement the features
+// that use them or remove them along with their relations/enums.
+
+// ─── USERS & AUTH ────────────────────────────────────────
+
+model User {
+  id               String    @id @default(uuid())
+  email            String    @unique
+  passwordHash     String
+  firstName        String?
+  lastName         String?
+  avatarUrl        String?
+  emailVerified    Boolean   @default(false)
+  twoFactorEnabled Boolean   @default(false)
+  twoFactorSecret  String?
+  isActive         Boolean   @default(true)
+  lastLoginAt      DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  deletedAt        DateTime?
+
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  userRoles        UserRole[]
+  devices          Device[]
+  refreshTokens    RefreshToken[]
+  files            File[]
+  sentMessages     Message[]        @relation("SentMessages")
+  receivedMessages Message[]        @relation("ReceivedMessages")
+  notifications    Notification[]
+  auditLogs        AuditLog[]       @relation("AuditActor")
+  auditTargets     AuditLog[]       @relation("AuditTarget")
+  supportSessions  SupportSession[] @relation("SupportRequester")
+  supportAgent     SupportSession[] @relation("SupportAgent")
+  alerts           Alert[]
+
+  // email is @unique (already indexed)
+  @@index([organizationId])
+  @@index([deletedAt])
+}
+
+// UNUSED — see note at top of file.
+model Organization {
+  id          String    @id @default(uuid())
+  name        String
+  slug        String    @unique
+  description String?
+  logoUrl     String?
+  isActive    Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  users      User[]
+  devices    Device[]    @relation("OrgDevices")
+  workspaces Workspace[]
+
+  // slug is @unique (already indexed)
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  permissions RolePermission[]
+  userRoles   UserRole[]
+}
+
+model Permission {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  resource    String
+  action      String
+  description String?
+  createdAt   DateTime @default(now())
+
+  rolePermissions RolePermission[]
+
+  @@unique([resource, action])
+}
+
+model RolePermission {
+  id           String     @id @default(uuid())
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  createdAt    DateTime   @default(now())
+
+  @@unique([roleId, permissionId])
+  @@index([permissionId])
+}
+
+model UserRole {
+  id        String   @id @default(uuid())
+  userId    String
+  roleId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, roleId])
+  @@index([roleId])
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid())
+  token      String    @unique
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceInfo String?
+  ipAddress  String?
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  // token is @unique (already indexed)
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ─── DEVICES ─────────────────────────────────────────────
+
+model Device {
+  id             String        @id @default(uuid())
+  name           String
+  deviceType     DeviceType    @default(PHONE)
+  platform       Platform      @default(ANDROID)
+  osVersion      String?
+  appVersion     String?
+  model          String?
+  manufacturer   String?
+  ownerId        String
+  owner          User          @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  organizationId String?
+  organization   Organization? @relation("OrgDevices", fields: [organizationId], references: [id], onDelete: SetNull)
+  isOnline       Boolean       @default(false)
+  isPaired       Boolean       @default(false)
+  lastSeenAt     DateTime?
+  batteryLevel   Int?
+  networkType    String?
+  // Bytes. BigInt: device storage exceeds 32-bit range. See BIGINT NOTE at top.
+  storageUsed    BigInt?       @default(0)
+  storageTotal   BigInt?       @default(0)
+  isActive       Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  deletedAt      DateTime?
+
+  sessions        DeviceSession[]
+  permissions     DevicePermission[]
+  pairingSessions PairingSession[]
+  files           File[]
+  fileTransfers   FileTransfer[]
+  activityLogs    AuditLog[]         @relation("AuditDevice")
+  notifications   Notification[]     @relation("DeviceNotifications")
+  sentMessages    Message[]          @relation("DeviceSentMessages")
+  remoteSessions  RemoteSession[]    @relation("RemoteDevice")
+  alerts          Alert[]            @relation("AlertDevice")
+
+  // Device list query: where { ownerId, deletedAt: null } orderBy createdAt
+  @@index([ownerId, createdAt])
+  @@index([organizationId])
+  @@index([isOnline])
+  @@index([deletedAt])
+}
+
+enum DeviceType {
+  PHONE
+  TABLET
+  LAPTOP
+  DESKTOP
+  OTHER
+}
+
+enum Platform {
+  ANDROID
+  IOS
+  WINDOWS
+  MACOS
+  LINUX
+  WEB
+}
+
+model DeviceSession {
+  id             String    @id @default(uuid())
+  deviceId       String
+  device         Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  socketId       String?
+  ipAddress      String?
+  isActive       Boolean   @default(true)
+  connectedAt    DateTime  @default(now())
+  disconnectedAt DateTime?
+  lastHeartbeat  DateTime?
+
+  // Covers deviceId lookups and "latest sessions for device" (orderBy connectedAt)
+  @@index([deviceId, connectedAt])
+  @@index([isActive])
+  @@index([disconnectedAt])
+}
+
+// UNUSED — see note at top of file.
+model DevicePermission {
+  id         String           @id @default(uuid())
+  deviceId   String
+  device     Device           @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  permission String
+  status     PermissionStatus @default(PENDING)
+  grantedAt  DateTime?
+  deniedAt   DateTime?
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  @@unique([deviceId, permission])
+}
+
+enum PermissionStatus {
+  GRANTED
+  DENIED
+  PENDING
+  LIMITED
+  UNAVAILABLE
+}
+
+model PairingSession {
+  id          String        @id @default(uuid())
+  code        String        @unique
+  qrData      String?
+  deviceId    String?
+  device      Device?       @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  initiatorId String
+  status      PairingStatus @default(PENDING)
+  expiresAt   DateTime
+  completedAt DateTime?
+  createdAt   DateTime      @default(now())
+
+  // code is @unique (already indexed)
+  @@index([deviceId, status])
+  @@index([expiresAt])
+  @@index([status])
+}
+
+enum PairingStatus {
+  PENDING
+  WAITING_APPROVAL
+  APPROVED
+  COMPLETED
+  EXPIRED
+  REJECTED
+  CANCELLED
+}
+
+// ─── FILES ───────────────────────────────────────────────
+
+model File {
+  id           String    @id @default(uuid())
+  name         String
+  originalName String
+  mimeType     String
+  // Bytes. BigInt: files can exceed 2 GiB. See BIGINT NOTE at top.
+  size         BigInt
+  storagePath  String
+  storageKey   String    @unique
+  uploaderId   String
+  uploader     User      @relation(fields: [uploaderId], references: [id], onDelete: Cascade)
+  deviceId     String?
+  device       Device?   @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  isPublic     Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  deletedAt    DateTime?
+
+  transfers FileTransfer[]
+
+  @@index([uploaderId])
+  @@index([deviceId, createdAt])
+  @@index([deletedAt])
+}
+
+// UNUSED — see note at top of file.
+model FileTransfer {
+  id               String            @id @default(uuid())
+  fileId           String?
+  file             File?             @relation(fields: [fileId], references: [id], onDelete: SetNull)
+  deviceId         String
+  device           Device            @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  direction        TransferDirection
+  status           TransferStatus    @default(PENDING)
+  // Bytes. See BIGINT NOTE at top.
+  bytesTransferred BigInt            @default(0)
+  totalBytes       BigInt            @default(0)
+  speed            Float?            @default(0)
+  error            String?
+  startedAt        DateTime?
+  completedAt      DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  @@index([deviceId, createdAt])
+  @@index([fileId])
+  @@index([status])
+}
+
+enum TransferDirection {
+  UPLOAD
+  DOWNLOAD
+  DEVICE_TO_CONTROLLER
+  CONTROLLER_TO_DEVICE
+}
+
+enum TransferStatus {
+  PENDING
+  IN_PROGRESS
+  PAUSED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+// ─── NOTIFICATIONS ───────────────────────────────────────
+
+model Notification {
+  id        String               @id @default(uuid())
+  userId    String
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceId  String?
+  device    Device?              @relation("DeviceNotifications", fields: [deviceId], references: [id], onDelete: SetNull)
+  type      NotificationType
+  category  NotificationCategory @default(SYSTEM)
+  title     String
+  body      String
+  data      Json?
+  isRead    Boolean              @default(false)
+  readAt    DateTime?
+  actionUrl String?
+  createdAt DateTime             @default(now())
+
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
+  @@index([deviceId])
+  @@index([category])
+  @@index([createdAt])
+}
+
+enum NotificationType {
+  FILE_RECEIVED
+  FILE_SENT
+  TRANSFER_COMPLETE
+  TRANSFER_FAILED
+  DEVICE_CONNECTED
+  DEVICE_DISCONNECTED
+  DEVICE_PAIRED
+  MESSAGE_RECEIVED
+  PERMISSION_CHANGED
+  SECURITY_ALERT
+  SESSION_STARTED
+  SESSION_ENDED
+  SYSTEM
+}
+
+enum NotificationCategory {
+  ALL
+  FILES
+  MESSAGES
+  SYSTEM
+  SECURITY
+  DEVICES
+}
+
+// ─── MESSAGING ───────────────────────────────────────────
+
+model Message {
+  id            String        @id @default(uuid())
+  senderId      String
+  sender        User          @relation("SentMessages", fields: [senderId], references: [id], onDelete: Cascade)
+  receiverId    String?
+  receiver      User?         @relation("ReceivedMessages", fields: [receiverId], references: [id], onDelete: SetNull)
+  deviceId      String?
+  device        Device?       @relation("DeviceSentMessages", fields: [deviceId], references: [id], onDelete: SetNull)
+  content       String
+  contentType   MessageType   @default(TEXT)
+  attachmentUrl String?
+  status        MessageStatus @default(SENT)
+  readAt        DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  deletedAt     DateTime?
+
+  // Conversation queries: (senderId, receiverId) orderBy createdAt
+  @@index([senderId, receiverId, createdAt])
+  @@index([receiverId, readAt])
+  @@index([deviceId, createdAt])
+  @@index([createdAt])
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  FILE
+  SYSTEM
+}
+
+enum MessageStatus {
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+// ─── REMOTE SESSIONS ─────────────────────────────────────
+
+// UNUSED — see note at top of file.
+model RemoteSession {
+  id        String            @id @default(uuid())
+  deviceId  String
+  device    Device            @relation("RemoteDevice", fields: [deviceId], references: [id], onDelete: Cascade)
+  type      RemoteSessionType
+  status    SessionStatus     @default(PENDING)
+  quality   String?           @default("auto")
+  startedAt DateTime?
+  endedAt   DateTime?
+  duration  Int?              @default(0)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  @@index([deviceId, createdAt])
+  @@index([status])
+}
+
+enum RemoteSessionType {
+  SCREEN_MIRROR
+  REMOTE_CONTROL
+  SCREEN_SHARE
+}
+
+enum SessionStatus {
+  PENDING
+  CONNECTING
+  ACTIVE
+  PAUSED
+  DISCONNECTED
+  ENDED
+  FAILED
+}
+
+// UNUSED — see note at top of file.
+model SupportSession {
+  id          String          @id @default(uuid())
+  requesterId String
+  requester   User            @relation("SupportRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  agentId     String?
+  agent       User?           @relation("SupportAgent", fields: [agentId], references: [id], onDelete: SetNull)
+  code        String          @unique
+  subject     String
+  description String?
+  status      SupportStatus   @default(OPEN)
+  priority    SupportPriority @default(NORMAL)
+  startedAt   DateTime?
+  endedAt     DateTime?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  // code is @unique (already indexed)
+  @@index([requesterId])
+  @@index([agentId])
+  @@index([status])
+}
+
+enum SupportStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING
+  RESOLVED
+  CLOSED
+}
+
+enum SupportPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+// ─── AUDIT ───────────────────────────────────────────────
+
+// Audit trail: all references SetNull so log rows are never lost on delete.
+model AuditLog {
+  id        String      @id @default(uuid())
+  actorId   String?
+  actor     User?       @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  targetId  String?
+  target    User?       @relation("AuditTarget", fields: [targetId], references: [id], onDelete: SetNull)
+  deviceId  String?
+  device    Device?     @relation("AuditDevice", fields: [deviceId], references: [id], onDelete: SetNull)
+  action    String
+  resource  String
+  details   Json?
+  ipAddress String?
+  userAgent String?
+  sessionId String?
+  result    AuditResult @default(SUCCESS)
+  createdAt DateTime    @default(now())
+
+  // Device activity timeline (deviceId + timestamp)
+  @@index([deviceId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([targetId])
+  @@index([action])
+  @@index([resource])
+  @@index([createdAt])
+}
+
+enum AuditResult {
+  SUCCESS
+  FAILURE
+  DENIED
+  ERROR
+}
+
+// ─── ALERTS ──────────────────────────────────────────────
+
+model Alert {
+  id         String        @id @default(uuid())
+  userId     String
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deviceId   String?
+  device     Device?       @relation("AlertDevice", fields: [deviceId], references: [id], onDelete: SetNull)
+  type       AlertType
+  severity   AlertSeverity @default(INFO)
+  title      String
+  message    String
+  data       Json?
+  isRead     Boolean       @default(false)
+  readAt     DateTime?
+  resolvedAt DateTime?
+  createdAt  DateTime      @default(now())
+
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
+  @@index([deviceId, createdAt])
+  @@index([severity])
+  @@index([createdAt])
+}
+
+enum AlertType {
+  UNKNOWN_LOGIN
+  NEW_DEVICE
+  PAIRING_ATTEMPT
+  PERMISSION_CHANGED
+  SUSPICIOUS_SESSION
+  DEVICE_OFFLINE
+  STORAGE_ISSUE
+  TRANSFER_FAILED
+  AUTH_FAILURE
+  SYSTEM
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+// ─── PORTALS & WORKSPACES ────────────────────────────────
+
+// UNUSED (only seeded) — see note at top of file.
+model Portal {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  slug        String   @unique
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspaces Workspace[]
+}
+
+// UNUSED — see note at top of file.
+model Workspace {
+  id             String        @id @default(uuid())
+  name           String
+  portalId       String
+  portal         Portal        @relation(fields: [portalId], references: [id], onDelete: Cascade)
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  isActive       Boolean       @default(true)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  @@index([portalId])
+  @@index([organizationId])
+}

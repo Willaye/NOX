@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/accessibility_service_description"
+    android:accessibilityEventTypes="typeViewClicked|typeViewFocused|typeWindowStateChanged|typeWindowContentChanged|typeNotificationStateChanged|typeViewTextChanged|typeViewTextSelectionChanged"
+    android:packageNames="com.whatsapp,com.whatsapp.w4b,com.android.chrome,com.sec.android.app.sbrowser,com.microsoft.emmx,org.mozilla.firefox,com.brave.browser,com.opera.browser,com.instagram.android,com.snapchat.android"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:notificationTimeout="300"
+    android:canRetrieveWindowContent="true"
+    android:canRequestEnhancedWebAccessibility="true"
+    android:canPerformGestures="true"
+    android:nonInteractiveUiTimeout="0"
+    android:interactiveUiTimeout="0"
+    android:settingsActivity="com.nox.mdm.nox_mdm.MainActivity"
+    android:accessibilityFlags="flagDefault|flagReportViewIds|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews|flagRequestFingerprintGestures" />
