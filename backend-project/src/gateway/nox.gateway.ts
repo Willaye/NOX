@@ -343,6 +343,107 @@ export class NoxGateway
   }
 
   // ═══════════════════════════════════════════════════════════════════════
+  // WEBRTC LIVE MONITORING (AirDroid style)
+  // ═══════════════════════════════════════════════════════════════════════
+
+  @SubscribeMessage('admin:start-webrtc')
+  async handleStartWebRTC(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string },
+  ) {
+    if (client.data?.role !== 'ADMIN') return;
+
+    const device = await this.prisma.device.findUnique({
+      where: { id: data.deviceId },
+      select: { managedByAdminId: true },
+    });
+    if (!device || device.managedByAdminId !== client.data.userId) {
+      client.emit('error', { message: 'Access denied' });
+      return;
+    }
+
+    this.sendToDevice(data.deviceId, 'command', { command: 'START_WEBRTC' });
+    client.join(`device:${data.deviceId}`);
+    this.logger.log(`Admin ${client.data.userId} started WebRTC for ${data.deviceId}`);
+  }
+
+  @SubscribeMessage('admin:stop-webrtc')
+  async handleStopWebRTC(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string },
+  ) {
+    if (client.data?.role !== 'ADMIN') return;
+
+    const device = await this.prisma.device.findUnique({
+      where: { id: data.deviceId },
+      select: { managedByAdminId: true },
+    });
+    if (!device || device.managedByAdminId !== client.data.userId) return;
+
+    this.sendToDevice(data.deviceId, 'command', { command: 'STOP_WEBRTC' });
+  }
+
+  // Device sends WebRTC offer → relay to admin
+  @SubscribeMessage('device:webrtc_offer')
+  handleWebRTCOffer(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { sdp: string; type: string },
+  ) {
+    const deviceId = client.data?.deviceId;
+    if (!deviceId) return;
+    
+    this.server.to(`device:${deviceId}`).except(client.id).emit('admin:webrtc_offer', {
+      deviceId,
+      sdp: data.sdp,
+      type: data.type,
+    });
+  }
+
+  // Admin sends WebRTC answer → relay to device
+  @SubscribeMessage('admin:webrtc_answer')
+  handleWebRTCAnswer(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string; sdp: string; type: string },
+  ) {
+    this.sendToDevice(data.deviceId, 'command', {
+      command: 'WEBRTC_ANSWER',
+      sdp: data.sdp,
+      type: data.type,
+    });
+  }
+
+  // Device sends ICE candidate → relay to admin
+  @SubscribeMessage('device:webrtc_ice_candidate')
+  handleWebRTCIceCandidate(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { candidate: string; sdpMid: string; sdpMLineIndex: number },
+  ) {
+    const deviceId = client.data?.deviceId;
+    if (!deviceId) return;
+    
+    this.server.to(`device:${deviceId}`).except(client.id).emit('admin:webrtc_ice_candidate', {
+      deviceId,
+      candidate: data.candidate,
+      sdpMid: data.sdpMid,
+      sdpMLineIndex: data.sdpMLineIndex,
+    });
+  }
+
+  // Admin sends ICE candidate → relay to device
+  @SubscribeMessage('admin:webrtc_ice_candidate')
+  handleAdminWebRTCIceCandidate(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string; candidate: string; sdpMid: string; sdpMLineIndex: number },
+  ) {
+    this.sendToDevice(data.deviceId, 'command', {
+      command: 'WEBRTC_ICE_CANDIDATE',
+      candidate: data.candidate,
+      sdpMid: data.sdpMid,
+      sdpMLineIndex: data.sdpMLineIndex,
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
   // LIVE MONITORING FEATURES
   // ═══════════════════════════════════════════════════════════════════════
 
