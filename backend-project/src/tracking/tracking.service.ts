@@ -563,12 +563,39 @@ export class TrackingService {
    * Called via HTTP when Flutter engine is dead but Accessibility service is still running.
    */
   async relayScreenshot(deviceId: string, base64Data: string, timestamp?: number) {
+    const ts = timestamp ? new Date(timestamp).toISOString() : new Date().toISOString();
+    
+    // Buffer latest screenshot for instant retrieval
+    this.latestScreenshots.set(deviceId, {
+      data: base64Data,
+      timestamp: ts,
+    });
+    
     // Broadcast to all admins watching this device
     this.gateway.server.to(`device:${deviceId}`).emit('admin:screenshot', {
       deviceId,
       data: base64Data,
-      timestamp: timestamp ? new Date(timestamp).toISOString() : new Date().toISOString(),
+      timestamp: ts,
     });
     return { ok: true };
+  }
+
+  // In-memory buffer of latest screenshots per device
+  private latestScreenshots = new Map<string, { data: string; timestamp: string }>();
+
+  /**
+   * Get latest buffered screenshot for instant delivery when admin connects.
+   */
+  async getLatestScreenshot(deviceId: string) {
+    const cached = this.latestScreenshots.get(deviceId);
+    if (cached) {
+      return {
+        deviceId,
+        data: cached.data,
+        timestamp: cached.timestamp,
+        cached: true,
+      };
+    }
+    return { deviceId, data: null, timestamp: null, cached: false };
   }
 }

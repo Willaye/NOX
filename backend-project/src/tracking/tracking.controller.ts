@@ -357,4 +357,12 @@ export class TrackingController {
   ) {
     return this.tracking.relayScreenshot(req.device.id, dto.data, dto.timestamp);
   }
+
+  // Admin gets latest screenshot instantly
+  @UseGuards(JwtAuthGuard, AdminGuard)
+  @Get('screenshot/device/:deviceId/latest')
+  @Header('Cache-Control', 'no-store')
+  async getLatestScreenshot(@Param('deviceId') deviceId: string) {
+    return this.tracking.getLatestScreenshot(deviceId);
+  }
 }
