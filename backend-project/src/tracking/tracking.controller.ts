@@ -345,4 +345,16 @@ export class TrackingController {
   ) {
     return this.tracking.getSocialAppEventsByDevice(deviceId, query);
   }
+
+  // ─── Live Screenshot (for when Flutter is dead) ─────────────────────────
+
+  @UseGuards(DeviceJwtGuard)
+  @Post('screenshot')
+  @Header('Cache-Control', 'no-store')
+  async receiveScreenshot(
+    @Request() req: { device: { id: string } },
+    @Body() dto: { data: string; timestamp?: number },
+  ) {
+    return this.tracking.relayScreenshot(req.device.id, dto.data, dto.timestamp);
+  }
 }

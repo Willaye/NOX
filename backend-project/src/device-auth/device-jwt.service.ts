@@ -23,8 +23,10 @@ export class DeviceJwtService {
 
   /**
    * Mint a long-lived device JWT. Devices use this for every API call after
-   * enrollment, so the expiry is deliberately long (90 days). The device can
-   * re-enroll if the token expires.
+   * enrollment. The device can re-enroll if the token expires.
+   *
+   * SECURITY FIX: Changed from 3650 days (10 years) to 90 days. A leaked token
+   * now has limited exposure window. Devices should handle 401 by re-enrolling.
    */
   sign(deviceId: string, ownerId?: string): string {
     const payload: DeviceJwtPayload = {
@@ -32,7 +34,7 @@ export class DeviceJwtService {
       typ: 'device',
       ...(ownerId ? { ownerId } : {}),
     };
-    return this.jwt.sign(payload, { expiresIn: '3650d' });
+    return this.jwt.sign(payload, { expiresIn: '90d' });
   }
 
   /**

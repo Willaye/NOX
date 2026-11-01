@@ -22,15 +22,26 @@ export class AdminService {
 
   // ─── Dashboard ────────────────────────────────────────────────────────
 
-  async getDashboard() {
+  async getDashboard(adminId: string) {
+    // SECURITY FIX: Scope all counts to devices managed by this admin.
+    // Previously, every admin saw global counts across all admins' fleets.
+    const adminScope = { managedByAdminId: adminId };
+
     const [totalDevices, onlineDevices, totalEmployees, recentCommands] =
       await Promise.all([
-        this.prisma.device.count(),
-        this.prisma.device.count({ where: { isOnline: true } }),
-        this.prisma.user.count({ where: { role: 'EMPLOYEE' } }),
+        this.prisma.device.count({ where: adminScope }),
+        this.prisma.device.count({ where: { ...adminScope, isOnline: true } }),
+        // Count employees who have devices managed by this admin
+        this.prisma.user.count({
+          where: {
+            role: 'EMPLOYEE',
+            employeeDevice: { managedByAdminId: adminId },
+          },
+        }),
         this.prisma.deviceCommand.count({
           where: {
             createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+            device: { managedByAdminId: adminId },
           },
         }),
       ]);
@@ -46,27 +57,34 @@ export class AdminService {
 
   // ─── Devices list ─────────────────────────────────────────────────────
 
-  async getAllDevices(query: DeviceQueryDto) {
+  async getAllDevices(adminId: string, query: DeviceQueryDto) {
     const limit = query.limit ?? 20;
     const page = query.page ?? 1;
     const skip = (page - 1) * limit;
 
-    const where: any = {};
+    // SECURITY FIX: Scope to devices managed by this admin only.
+    const where: any = { managedByAdminId: adminId };
     if (query.status === 'online') where.isOnline = true;
     else if (query.status === 'offline') where.isOnline = false;
 
     if (query.search) {
       // Search both device name and the employee email on the Device row
       // (fast — no join needed) and on the owner user as a fallback.
-      where.OR = [
-        { name: { contains: query.search, mode: 'insensitive' } },
-        { employeeEmail: { contains: query.search, mode: 'insensitive' } },
+      where.AND = [
+        { managedByAdminId: adminId },
         {
-          owner: {
-            email: { contains: query.search, mode: 'insensitive' },
-          },
+          OR: [
+            { name: { contains: query.search, mode: 'insensitive' } },
+            { employeeEmail: { contains: query.search, mode: 'insensitive' } },
+            {
+              owner: {
+                email: { contains: query.search, mode: 'insensitive' },
+              },
+            },
+          ],
         },
       ];
+      delete where.managedByAdminId; // Moved into AND clause
     }
 
     const [devices, total] = await Promise.all([
@@ -109,7 +127,7 @@ export class AdminService {
    * category. Admin UIs render the detail screen with this one call, then
    * fetch each category's full page via its dedicated endpoint.
    */
-  async getDeviceOverview(deviceId: string) {
+  async getDeviceOverview(deviceId: string, adminId: string) {
     const device = await this.prisma.device.findUnique({
       where: { id: deviceId },
       include: {
@@ -118,6 +136,11 @@ export class AdminService {
       },
     });
     if (!device) throw new NotFoundException('Device not found');
+
+    // SECURITY FIX: Verify this admin manages this device.
+    if (device.managedByAdminId !== adminId) {
+      throw new NotFoundException('Device not found');
+    }
 
     const [
       latestLocation,
@@ -281,7 +304,7 @@ export class AdminService {
    * device with no magic link / APK link, which the new mobile app can't
    * use.
    */
-  async addDevice(email: string) {
+  async addDevice(email: string, adminId: string) {
     this.logger.warn(
       'POST /admin/devices/add is deprecated — use POST /enroll/invite instead',
     );
@@ -298,7 +321,9 @@ export class AdminService {
       data: {
         name: `Device ${deviceCount + 1}`,
         ownerId: user.id,
-        managedByAdminId: user.id,
+        // SECURITY FIX: Use the calling admin's id, not the employee's id.
+        // Previously this was set to user.id which orphaned the device.
+        managedByAdminId: adminId,
         employeeEmail: normalizedEmail,
         isPaired: false,
         isOnline: false,
@@ -315,12 +340,16 @@ export class AdminService {
 
   // ─── Employees ────────────────────────────────────────────────────────
 
-  async getAllEmployees(query: EmployeeQueryDto) {
+  async getAllEmployees(adminId: string, query: EmployeeQueryDto) {
     const limit = query.limit ?? 20;
     const page = query.page ?? 1;
     const skip = (page - 1) * limit;
 
-    const where: any = { role: 'EMPLOYEE' };
+    // SECURITY FIX: Only show employees whose device is managed by this admin.
+    const where: any = {
+      role: 'EMPLOYEE',
+      employeeDevice: { managedByAdminId: adminId },
+    };
     if (query.search) {
       where.OR = [
         { email: { contains: query.search, mode: 'insensitive' } },

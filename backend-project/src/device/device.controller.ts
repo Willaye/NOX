@@ -89,4 +89,14 @@ export class DeviceController {
   issueToken(@Request() req: any, @Param('id') id: string) {
     return this.deviceService.issueDeviceToken(req.user.id, id, req.user.role);
   }
+
+  // Device polls for pending commands (used when Flutter is dead but native service is running)
+  @UseGuards(DeviceJwtGuard)
+  @Get(':id/commands')
+  getCommands(
+    @Request() req: { device: { id: string } },
+    @Param('id') urlId: string,
+  ) {
+    return this.deviceService.getPendingCommands(req.device.id || urlId);
+  }
 }

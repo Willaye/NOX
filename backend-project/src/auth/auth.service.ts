@@ -111,17 +111,21 @@ export class AuthService {
   async requestMagicLink(dto: RequestMagicLinkDto) {
     const email = this.normalizeEmail(dto.email);
 
-    // Find or create — upsert avoids the find/create race on the unique email.
-    // Users created through the magic-link flow are admins by default; employee
-    // devices get provisioned through the separate /enroll flow.
-    const user = await this.prisma.user.upsert({
+    // SECURITY FIX: Only allow magic-link for EXISTING users. Previously this
+    // would auto-create any email as ADMIN, allowing strangers to self-promote.
+    // New admins must be created via a seed script or by an existing admin.
+    // Employees are created via the /enroll flow (invite-based).
+    const user = await this.prisma.user.findUnique({
       where: { email },
-      update: {},
-      create: {
-        email,
-        role: UserRole.ADMIN,
-      },
     });
+
+    if (!user) {
+      // Return the same generic message to avoid email enumeration attacks.
+      // The caller cannot distinguish "user doesn't exist" from "email sent".
+      return {
+        message: 'If the email is valid, a sign-in code has been sent',
+      };
+    }
 
     // Invalidate any previous unused links so only the newest code works.
     // Avoids an attacker racing two concurrent requests to confuse the user.

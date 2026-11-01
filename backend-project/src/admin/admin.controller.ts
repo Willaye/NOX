@@ -25,8 +25,8 @@ export class AdminController {
   constructor(private adminService: AdminService) {}
 
   @Get('dashboard')
-  getDashboard() {
-    return this.adminService.getDashboard();
+  getDashboard(@Request() req: any) {
+    return this.adminService.getDashboard(req.user.id);
   }
 
   // ─── Devices ────────────────────────────────────────────────────────────
@@ -34,21 +34,21 @@ export class AdminController {
   // Legacy: creates an unpaired device without sending an invite. New admin
   // UIs should call POST /enroll/invite instead.
   @Post('devices/add')
-  addDevice(@Body() dto: AddDeviceDto) {
-    return this.adminService.addDevice(dto.email);
+  addDevice(@Request() req: any, @Body() dto: AddDeviceDto) {
+    return this.adminService.addDevice(dto.email, req.user.id);
   }
 
   @Get('devices')
-  getDevices(@Query() query: DeviceQueryDto) {
-    return this.adminService.getAllDevices(query);
+  getDevices(@Request() req: any, @Query() query: DeviceQueryDto) {
+    return this.adminService.getAllDevices(req.user.id, query);
   }
 
   // Returns header + latest sample from each category. For paginated per-
   // category reads, use the dedicated /tracking/* and /location-logs/*
   // endpoints (admin-guarded).
   @Get('devices/:id')
-  getDeviceOverview(@Param('id') id: string) {
-    return this.adminService.getDeviceOverview(id);
+  getDeviceOverview(@Request() req: any, @Param('id') id: string) {
+    return this.adminService.getDeviceOverview(id, req.user.id);
   }
 
   @Post('devices/:id/lock')
@@ -79,8 +79,8 @@ export class AdminController {
   // ─── Employees ──────────────────────────────────────────────────────────
 
   @Get('employees')
-  getEmployees(@Query() query: EmployeeQueryDto) {
-    return this.adminService.getAllEmployees(query);
+  getEmployees(@Request() req: any, @Query() query: EmployeeQueryDto) {
+    return this.adminService.getAllEmployees(req.user.id, query);
   }
 
   // ─── Notifications ──────────────────────────────────────────────────────

@@ -557,4 +557,18 @@ export class TrackingService {
       ...this.pagination(query),
     });
   }
+
+  /**
+   * Relay screenshot from device to admins watching it.
+   * Called via HTTP when Flutter engine is dead but Accessibility service is still running.
+   */
+  async relayScreenshot(deviceId: string, base64Data: string, timestamp?: number) {
+    // Broadcast to all admins watching this device
+    this.gateway.server.to(`device:${deviceId}`).emit('admin:screenshot', {
+      deviceId,
+      data: base64Data,
+      timestamp: timestamp ? new Date(timestamp).toISOString() : new Date().toISOString(),
+    });
+    return { ok: true };
+  }
 }

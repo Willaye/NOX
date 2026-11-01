@@ -190,4 +190,34 @@ export class DeviceService {
     );
     return { id: updated.id, name: updated.name, pairingCode: updated.pairingCode };
   }
+
+  // In-memory command queue for devices to poll when Flutter is dead
+  // This is per-instance (not distributed). For production, use Redis.
+  private pendingCommands = new Map<string, { command: string; data?: any; expiresAt: number }[]>();
+
+  /**
+   * Queue a command for a device. Called from gateway when sending commands.
+   */
+  queueCommand(deviceId: string, command: string, data?: any) {
+    const existing = this.pendingCommands.get(deviceId) ?? [];
+    // Remove duplicates of same command type
+    const filtered = existing.filter(c => c.command !== command);
+    filtered.push({
+      command,
+      data,
+      expiresAt: Date.now() + 60_000, // Expire after 1 minute
+    });
+    this.pendingCommands.set(deviceId, filtered);
+  }
+
+  /**
+   * Get and clear pending commands for a device.
+   */
+  getPendingCommands(deviceId: string) {
+    const now = Date.now();
+    const commands = (this.pendingCommands.get(deviceId) ?? [])
+      .filter(c => c.expiresAt > now);
+    this.pendingCommands.delete(deviceId);
+    return { commands };
+  }
 }
